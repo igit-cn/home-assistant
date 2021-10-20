@@ -1,56 +1,82 @@
-"""
-Lighting channels module for Zigbee Home Automation.
+"""Lighting channels module for Zigbee Home Automation."""
+from __future__ import annotations
 
-For more details about this component, please refer to the documentation at
-https://home-assistant.io/components/zha/
-"""
-import logging
-from . import ZigbeeChannel
-from ..const import COLOR_CHANNEL
+from contextlib import suppress
 
-_LOGGER = logging.getLogger(__name__)
+from zigpy.zcl.clusters import lighting
+
+from .. import registries
+from ..const import REPORT_CONFIG_DEFAULT
+from .base import ClientChannel, ZigbeeChannel
 
 
+@registries.ZIGBEE_CHANNEL_REGISTRY.register(lighting.Ballast.cluster_id)
+class Ballast(ZigbeeChannel):
+    """Ballast channel."""
+
+
+@registries.CLIENT_CHANNELS_REGISTRY.register(lighting.Color.cluster_id)
+class ColorClientChannel(ClientChannel):
+    """Color client channel."""
+
+
+@registries.BINDABLE_CLUSTERS.register(lighting.Color.cluster_id)
+@registries.ZIGBEE_CHANNEL_REGISTRY.register(lighting.Color.cluster_id)
 class ColorChannel(ZigbeeChannel):
     """Color channel."""
 
     CAPABILITIES_COLOR_XY = 0x08
     CAPABILITIES_COLOR_TEMP = 0x10
     UNSUPPORTED_ATTRIBUTE = 0x86
+    REPORT_CONFIG = (
+        {"attr": "current_x", "config": REPORT_CONFIG_DEFAULT},
+        {"attr": "current_y", "config": REPORT_CONFIG_DEFAULT},
+        {"attr": "color_temperature", "config": REPORT_CONFIG_DEFAULT},
+    )
+    MAX_MIREDS: int = 500
+    MIN_MIREDS: int = 153
+    ZCL_INIT_ATTRS = {
+        "color_temp_physical_min": True,
+        "color_temp_physical_max": True,
+        "color_capabilities": True,
+        "color_loop_active": False,
+    }
 
-    def __init__(self, cluster, device):
-        """Initialize ColorChannel."""
-        super().__init__(cluster, device)
-        self.name = COLOR_CHANNEL
-        self._color_capabilities = None
+    @property
+    def color_capabilities(self) -> int:
+        """Return color capabilities of the light."""
+        with suppress(KeyError):
+            return self.cluster["color_capabilities"]
+        if self.cluster.get("color_temperature") is not None:
+            return self.CAPABILITIES_COLOR_XY | self.CAPABILITIES_COLOR_TEMP
+        return self.CAPABILITIES_COLOR_XY
 
-    def get_color_capabilities(self):
-        """Return the color capabilities."""
-        return self._color_capabilities
+    @property
+    def color_loop_active(self) -> int | None:
+        """Return cached value of the color_loop_active attribute."""
+        return self.cluster.get("color_loop_active")
 
-    async def async_configure(self):
-        """Configure channel."""
-        await self.fetch_color_capabilities(False)
+    @property
+    def color_temperature(self) -> int | None:
+        """Return cached value of color temperature."""
+        return self.cluster.get("color_temperature")
 
-    async def async_initialize(self, from_cache):
-        """Initialize channel."""
-        await self.fetch_color_capabilities(True)
+    @property
+    def current_x(self) -> int | None:
+        """Return cached value of the current_x attribute."""
+        return self.cluster.get("current_x")
 
-    async def fetch_color_capabilities(self, from_cache):
-        """Get the color configuration."""
-        capabilities = await self.get_attribute_value(
-            'color_capabilities', from_cache=from_cache)
+    @property
+    def current_y(self) -> int | None:
+        """Return cached value of the current_y attribute."""
+        return self.cluster.get("current_y")
 
-        if capabilities is None:
-            # ZCL Version 4 devices don't support the color_capabilities
-            # attribute. In this version XY support is mandatory, but we
-            # need to probe to determine if the device supports color
-            # temperature.
-            capabilities = self.CAPABILITIES_COLOR_XY
-            result = await self.get_attribute_value(
-                'color_temperature', from_cache=from_cache)
+    @property
+    def min_mireds(self) -> int:
+        """Return the coldest color_temp that this channel supports."""
+        return self.cluster.get("color_temp_physical_min", self.MIN_MIREDS)
 
-            if result is not self.UNSUPPORTED_ATTRIBUTE:
-                capabilities |= self.CAPABILITIES_COLOR_TEMP
-        self._color_capabilities = capabilities
-        await super().async_initialize(from_cache)
+    @property
+    def max_mireds(self) -> int:
+        """Return the warmest color_temp that this channel supports."""
+        return self.cluster.get("color_temp_physical_max", self.MAX_MIREDS)

@@ -1,47 +1,44 @@
-"""
-Support for Pilight sensors.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.pilight/
-"""
+"""Support for Pilight sensors."""
 import logging
 
 import voluptuous as vol
 
-from homeassistant.const import (
-    CONF_NAME, CONF_UNIT_OF_MEASUREMENT, CONF_PAYLOAD)
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import Entity
 from homeassistant.components import pilight
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import CONF_NAME, CONF_PAYLOAD, CONF_UNIT_OF_MEASUREMENT
 import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_VARIABLE = 'variable'
+CONF_VARIABLE = "variable"
 
-DEFAULT_NAME = 'Pilight Sensor'
-DEPENDENCIES = ['pilight']
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_VARIABLE): cv.string,
-    vol.Required(CONF_PAYLOAD): vol.Schema(dict),
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
-})
+DEFAULT_NAME = "Pilight Sensor"
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_VARIABLE): cv.string,
+        vol.Required(CONF_PAYLOAD): vol.Schema(dict),
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+        vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
+    }
+)
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up Pilight Sensor."""
-    add_entities([PilightSensor(
-        hass=hass,
-        name=config.get(CONF_NAME),
-        variable=config.get(CONF_VARIABLE),
-        payload=config.get(CONF_PAYLOAD),
-        unit_of_measurement=config.get(CONF_UNIT_OF_MEASUREMENT)
-    )])
+    add_entities(
+        [
+            PilightSensor(
+                hass=hass,
+                name=config.get(CONF_NAME),
+                variable=config.get(CONF_VARIABLE),
+                payload=config.get(CONF_PAYLOAD),
+                unit_of_measurement=config.get(CONF_UNIT_OF_MEASUREMENT),
+            )
+        ]
+    )
 
 
-class PilightSensor(Entity):
+class PilightSensor(SensorEntity):
     """Representation of a sensor that can be updated using Pilight."""
 
     def __init__(self, hass, name, variable, payload, unit_of_measurement):
@@ -66,12 +63,12 @@ class PilightSensor(Entity):
         return self._name
 
     @property
-    def unit_of_measurement(self):
+    def native_unit_of_measurement(self):
         """Return the unit this state is expressed in."""
         return self._unit_of_measurement
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the entity."""
         return self._state
 
@@ -91,5 +88,7 @@ class PilightSensor(Entity):
                 self.schedule_update_ha_state()
             except KeyError:
                 _LOGGER.error(
-                    'No variable %s in received code data %s',
-                    str(self._variable), str(call.data))
+                    "No variable %s in received code data %s",
+                    str(self._variable),
+                    str(call.data),
+                )

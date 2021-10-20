@@ -1,57 +1,85 @@
-"""
-Support for consuming values for the Volkszaehler API.
+"""Support for consuming values for the Volkszaehler API."""
+from __future__ import annotations
 
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.volkszaehler/
-"""
 from datetime import timedelta
 import logging
 
+from volkszaehler import Volkszaehler
+from volkszaehler.exceptions import VolkszaehlerApiConnectionError
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA,
+    SensorEntity,
+    SensorEntityDescription,
+)
 from homeassistant.const import (
-    CONF_HOST, CONF_NAME, CONF_PORT, CONF_MONITORED_CONDITIONS, POWER_WATT,
-    ENERGY_WATT_HOUR)
+    CONF_HOST,
+    CONF_MONITORED_CONDITIONS,
+    CONF_NAME,
+    CONF_PORT,
+    ENERGY_WATT_HOUR,
+    POWER_WATT,
+)
 from homeassistant.exceptions import PlatformNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
-
-REQUIREMENTS = ['volkszaehler==0.1.2']
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_UUID = 'uuid'
+CONF_UUID = "uuid"
 
-DEFAULT_HOST = 'localhost'
-DEFAULT_NAME = 'Volkszaehler'
+DEFAULT_HOST = "localhost"
+DEFAULT_NAME = "Volkszaehler"
 DEFAULT_PORT = 80
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(minutes=1)
 
-SENSOR_TYPES = {
-    'average': ['Average', POWER_WATT, 'mdi:power-off'],
-    'consumption': ['Consumption', ENERGY_WATT_HOUR, 'mdi:power-plug'],
-    'max': ['Max', POWER_WATT, 'mdi:arrow-up'],
-    'min': ['Min', POWER_WATT, 'mdi:arrow-down'],
-}
+SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="average",
+        name="Average",
+        native_unit_of_measurement=POWER_WATT,
+        icon="mdi:power-off",
+    ),
+    SensorEntityDescription(
+        key="consumption",
+        name="Consumption",
+        native_unit_of_measurement=ENERGY_WATT_HOUR,
+        icon="mdi:power-plug",
+    ),
+    SensorEntityDescription(
+        key="max",
+        name="Max",
+        native_unit_of_measurement=POWER_WATT,
+        icon="mdi:arrow-up",
+    ),
+    SensorEntityDescription(
+        key="min",
+        name="Min",
+        native_unit_of_measurement=POWER_WATT,
+        icon="mdi:arrow-down",
+    ),
+)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_UUID): cv.string,
-    vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-    vol.Optional(CONF_MONITORED_CONDITIONS, default=['average']):
-        vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
-})
+SENSOR_KEYS: list[str] = [desc.key for desc in SENSOR_TYPES]
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_UUID): cv.string,
+        vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+        vol.Optional(CONF_MONITORED_CONDITIONS, default=["average"]): vol.All(
+            cv.ensure_list, [vol.In(SENSOR_KEYS)]
+        ),
+    }
+)
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the Volkszaehler sensors."""
-    from volkszaehler import Volkszaehler
 
     host = config[CONF_HOST]
     name = config[CONF_NAME]
@@ -61,61 +89,46 @@ async def async_setup_platform(
 
     session = async_get_clientsession(hass)
     vz_api = VolkszaehlerData(
-        Volkszaehler(hass.loop, session, uuid, host=host, port=port))
+        Volkszaehler(hass.loop, session, uuid, host=host, port=port)
+    )
 
     await vz_api.async_update()
 
     if vz_api.api.data is None:
         raise PlatformNotReady
 
-    dev = []
-    for condition in conditions:
-        dev.append(VolkszaehlerSensor(vz_api, name, condition))
+    entities = [
+        VolkszaehlerSensor(vz_api, name, description)
+        for description in SENSOR_TYPES
+        if description.key in conditions
+    ]
 
-    async_add_entities(dev, True)
+    async_add_entities(entities, True)
 
 
-class VolkszaehlerSensor(Entity):
+class VolkszaehlerSensor(SensorEntity):
     """Implementation of a Volkszaehler sensor."""
 
-    def __init__(self, vz_api, name, sensor_type):
+    def __init__(self, vz_api, name, description: SensorEntityDescription):
         """Initialize the Volkszaehler sensor."""
+        self.entity_description = description
         self.vz_api = vz_api
-        self._name = name
-        self.type = sensor_type
-        self._state = None
 
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return '{} {}'.format(self._name, SENSOR_TYPES[self.type][0])
-
-    @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return SENSOR_TYPES[self.type][2]
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit the value is expressed in."""
-        return SENSOR_TYPES[self.type][1]
+        self._attr_name = f"{name} {description.name}"
 
     @property
     def available(self):
         """Could the device be accessed during the last update call."""
         return self.vz_api.available
 
-    @property
-    def state(self):
-        """Return the state of the resources."""
-        return self._state
-
     async def async_update(self):
         """Get the latest data from REST API."""
         await self.vz_api.async_update()
 
         if self.vz_api.api.data is not None:
-            self._state = round(getattr(self.vz_api.api, self.type), 2)
+            self._attr_native_value = round(
+                getattr(self.vz_api.api, self.entity_description.key), 2
+            )
 
 
 class VolkszaehlerData:
@@ -129,7 +142,6 @@ class VolkszaehlerData:
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     async def async_update(self):
         """Get the latest data from the Volkszaehler REST API."""
-        from volkszaehler.exceptions import VolkszaehlerApiConnectionError
 
         try:
             await self.api.get_data()

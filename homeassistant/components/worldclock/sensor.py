@@ -1,50 +1,52 @@
-"""
-Support for showing the time in a different time zone.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.worldclock/
-"""
-import logging
-
+"""Support for showing the time in a different time zone."""
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (CONF_NAME, CONF_TIME_ZONE)
-import homeassistant.util.dt as dt_util
-from homeassistant.helpers.entity import Entity
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import CONF_NAME, CONF_TIME_ZONE
 import homeassistant.helpers.config_validation as cv
+import homeassistant.util.dt as dt_util
 
-_LOGGER = logging.getLogger(__name__)
+CONF_TIME_FORMAT = "time_format"
 
-DEFAULT_NAME = 'Worldclock Sensor'
+DEFAULT_NAME = "Worldclock Sensor"
+ICON = "mdi:clock"
+DEFAULT_TIME_STR_FORMAT = "%H:%M"
 
-ICON = 'mdi:clock'
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_TIME_ZONE): cv.time_zone,
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+        vol.Optional(CONF_TIME_FORMAT, default=DEFAULT_TIME_STR_FORMAT): cv.string,
+    }
+)
 
-TIME_STR_FORMAT = '%H:%M'
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_TIME_ZONE): cv.time_zone,
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-})
-
-
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the World clock sensor."""
     name = config.get(CONF_NAME)
     time_zone = dt_util.get_time_zone(config.get(CONF_TIME_ZONE))
 
-    async_add_entities([WorldClockSensor(time_zone, name)], True)
+    async_add_entities(
+        [
+            WorldClockSensor(
+                time_zone,
+                name,
+                config.get(CONF_TIME_FORMAT),
+            )
+        ],
+        True,
+    )
 
 
-class WorldClockSensor(Entity):
+class WorldClockSensor(SensorEntity):
     """Representation of a World clock sensor."""
 
-    def __init__(self, time_zone, name):
+    def __init__(self, time_zone, name, time_format):
         """Initialize the sensor."""
         self._name = name
         self._time_zone = time_zone
         self._state = None
+        self._time_format = time_format
 
     @property
     def name(self):
@@ -52,7 +54,7 @@ class WorldClockSensor(Entity):
         return self._name
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the device."""
         return self._state
 
@@ -63,5 +65,4 @@ class WorldClockSensor(Entity):
 
     async def async_update(self):
         """Get the time and updates the states."""
-        self._state = dt_util.now(time_zone=self._time_zone).strftime(
-            TIME_STR_FORMAT)
+        self._state = dt_util.now(time_zone=self._time_zone).strftime(self._time_format)

@@ -1,155 +1,109 @@
 """deCONZ switch platform tests."""
-from unittest.mock import Mock, patch
 
-from homeassistant import config_entries
-from homeassistant.components import deconz
-from homeassistant.components.deconz.const import SWITCH_TYPES
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.setup import async_setup_component
+from unittest.mock import patch
 
-import homeassistant.components.switch as switch
+from homeassistant.components.switch import (
+    DOMAIN as SWITCH_DOMAIN,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+)
+from homeassistant.const import ATTR_ENTITY_ID, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 
-from tests.common import mock_coro
-
-SUPPORTED_SWITCHES = {
-    "1": {
-        "id": "Switch 1 id",
-        "name": "Switch 1 name",
-        "type": "On/Off plug-in unit",
-        "state": {"on": True, "reachable": True},
-        "uniqueid": "00:00:00:00:00:00:00:00-00"
-    },
-    "2": {
-        "id": "Switch 2 id",
-        "name": "Switch 2 name",
-        "type": "Smart plug",
-        "state": {"on": True, "reachable": True}
-    },
-    "3": {
-        "id": "Switch 3 id",
-        "name": "Switch 3 name",
-        "type": "Warning device",
-        "state": {"alert": "lselect", "reachable": True}
-    }
-}
-
-UNSUPPORTED_SWITCH = {
-    "1": {
-        "id": "Switch id",
-        "name": "Unsupported switch",
-        "type": "Not a smart plug",
-        "state": {}
-    }
-}
+from .test_gateway import (
+    DECONZ_WEB_REQUEST,
+    mock_deconz_put_request,
+    setup_deconz_integration,
+)
 
 
-ENTRY_CONFIG = {
-    deconz.const.CONF_ALLOW_CLIP_SENSOR: True,
-    deconz.const.CONF_ALLOW_DECONZ_GROUPS: True,
-    deconz.config_flow.CONF_API_KEY: "ABCDEF",
-    deconz.config_flow.CONF_BRIDGEID: "0123456789",
-    deconz.config_flow.CONF_HOST: "1.2.3.4",
-    deconz.config_flow.CONF_PORT: 80
-}
-
-
-async def setup_gateway(hass, data):
-    """Load the deCONZ switch platform."""
-    from pydeconz import DeconzSession
-    loop = Mock()
-    session = Mock()
-
-    config_entry = config_entries.ConfigEntry(
-        1, deconz.DOMAIN, 'Mock Title', ENTRY_CONFIG, 'test',
-        config_entries.CONN_CLASS_LOCAL_PUSH)
-    gateway = deconz.DeconzGateway(hass, config_entry)
-    gateway.api = DeconzSession(loop, session, **config_entry.data)
-    gateway.api.config = Mock()
-    hass.data[deconz.DOMAIN] = gateway
-
-    with patch('pydeconz.DeconzSession.async_get_state',
-               return_value=mock_coro(data)):
-        await gateway.api.async_load_parameters()
-
-    await hass.config_entries.async_forward_entry_setup(config_entry, 'switch')
-    # To flush out the service call to update the group
-    await hass.async_block_till_done()
-
-
-async def test_platform_manually_configured(hass):
-    """Test that we do not discover anything or try to set up a gateway."""
-    assert await async_setup_component(hass, switch.DOMAIN, {
-        'switch': {
-            'platform': deconz.DOMAIN
-        }
-    }) is True
-    assert deconz.DOMAIN not in hass.data
-
-
-async def test_no_switches(hass):
+async def test_no_switches(hass, aioclient_mock):
     """Test that no switch entities are created."""
-    await setup_gateway(hass, {})
-    assert len(hass.data[deconz.DOMAIN].deconz_ids) == 0
+    await setup_deconz_integration(hass, aioclient_mock)
     assert len(hass.states.async_all()) == 0
 
 
-async def test_switches(hass):
+async def test_power_plugs(hass, aioclient_mock, mock_deconz_websocket):
     """Test that all supported switch entities are created."""
-    with patch('pydeconz.DeconzSession.async_put_state',
-               return_value=mock_coro(True)):
-        await setup_gateway(hass, {"lights": SUPPORTED_SWITCHES})
-    assert "switch.switch_1_name" in hass.data[deconz.DOMAIN].deconz_ids
-    assert "switch.switch_2_name" in hass.data[deconz.DOMAIN].deconz_ids
-    assert "switch.switch_3_name" in hass.data[deconz.DOMAIN].deconz_ids
-    assert len(SUPPORTED_SWITCHES) == len(SWITCH_TYPES)
+    data = {
+        "lights": {
+            "1": {
+                "name": "On off switch",
+                "type": "On/Off plug-in unit",
+                "state": {"on": True, "reachable": True},
+                "uniqueid": "00:00:00:00:00:00:00:00-00",
+            },
+            "2": {
+                "name": "Smart plug",
+                "type": "Smart plug",
+                "state": {"on": False, "reachable": True},
+                "uniqueid": "00:00:00:00:00:00:00:01-00",
+            },
+            "3": {
+                "name": "Unsupported switch",
+                "type": "Not a switch",
+                "state": {"reachable": True},
+                "uniqueid": "00:00:00:00:00:00:00:03-00",
+            },
+            "4": {
+                "name": "On off relay",
+                "state": {"on": True, "reachable": True},
+                "type": "On/Off light",
+                "uniqueid": "00:00:00:00:00:00:00:04-00",
+            },
+        }
+    }
+    with patch.dict(DECONZ_WEB_REQUEST, data):
+        config_entry = await setup_deconz_integration(hass, aioclient_mock)
+
     assert len(hass.states.async_all()) == 4
+    assert hass.states.get("switch.on_off_switch").state == STATE_ON
+    assert hass.states.get("switch.smart_plug").state == STATE_OFF
+    assert hass.states.get("switch.on_off_relay").state == STATE_ON
+    assert hass.states.get("switch.unsupported_switch") is None
 
-    switch_1 = hass.states.get('switch.switch_1_name')
-    assert switch_1 is not None
-    assert switch_1.state == 'on'
-    switch_3 = hass.states.get('switch.switch_3_name')
-    assert switch_3 is not None
-    assert switch_3.state == 'on'
-
-    hass.data[deconz.DOMAIN].api.lights['1'].async_update({})
-
-    await hass.services.async_call('switch', 'turn_on', {
-        'entity_id': 'switch.switch_1_name'
-    }, blocking=True)
-    await hass.services.async_call('switch', 'turn_off', {
-        'entity_id': 'switch.switch_1_name'
-    }, blocking=True)
-
-    await hass.services.async_call('switch', 'turn_on', {
-        'entity_id': 'switch.switch_3_name'
-    }, blocking=True)
-    await hass.services.async_call('switch', 'turn_off', {
-        'entity_id': 'switch.switch_3_name'
-    }, blocking=True)
-
-
-async def test_add_new_switch(hass):
-    """Test successful creation of switch entity."""
-    await setup_gateway(hass, {})
-    switch = Mock()
-    switch.name = 'name'
-    switch.type = "Smart plug"
-    switch.register_async_callback = Mock()
-    async_dispatcher_send(hass, 'deconz_new_light', [switch])
+    event_changed_light = {
+        "t": "event",
+        "e": "changed",
+        "r": "lights",
+        "id": "1",
+        "state": {"on": False},
+    }
+    await mock_deconz_websocket(data=event_changed_light)
     await hass.async_block_till_done()
-    assert "switch.name" in hass.data[deconz.DOMAIN].deconz_ids
 
+    assert hass.states.get("switch.on_off_switch").state == STATE_OFF
 
-async def test_unsupported_switch(hass):
-    """Test that unsupported switches are not created."""
-    await setup_gateway(hass, {"lights": UNSUPPORTED_SWITCH})
+    # Verify service calls
+
+    mock_deconz_put_request(aioclient_mock, config_entry.data, "/lights/1/state")
+
+    # Service turn on power plug
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: "switch.on_off_switch"},
+        blocking=True,
+    )
+    assert aioclient_mock.mock_calls[1][2] == {"on": True}
+
+    # Service turn off power plug
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: "switch.on_off_switch"},
+        blocking=True,
+    )
+    assert aioclient_mock.mock_calls[2][2] == {"on": False}
+
+    await hass.config_entries.async_unload(config_entry.entry_id)
+
+    states = hass.states.async_all()
+    assert len(states) == 4
+    for state in states:
+        assert state.state == STATE_UNAVAILABLE
+
+    await hass.config_entries.async_remove(config_entry.entry_id)
+    await hass.async_block_till_done()
     assert len(hass.states.async_all()) == 0
-
-
-async def test_unload_switch(hass):
-    """Test that it works to unload switch entities."""
-    await setup_gateway(hass, {"lights": SUPPORTED_SWITCHES})
-
-    await hass.data[deconz.DOMAIN].async_reset()
-
-    assert len(hass.states.async_all()) == 1

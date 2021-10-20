@@ -1,54 +1,41 @@
-"""
-Support for displaying the current CPU speed.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.cpuspeed/
-"""
-import logging
-
+"""Support for displaying the current CPU speed."""
+from cpuinfo import cpuinfo
 import voluptuous as vol
 
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import CONF_NAME, FREQUENCY_GIGAHERTZ
 import homeassistant.helpers.config_validation as cv
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import CONF_NAME
-from homeassistant.helpers.entity import Entity
 
-REQUIREMENTS = ['py-cpuinfo==4.0.0']
+ATTR_BRAND = "brand"
+ATTR_HZ = "ghz_advertised"
+ATTR_ARCH = "arch"
 
-_LOGGER = logging.getLogger(__name__)
+HZ_ACTUAL = "hz_actual"
+HZ_ADVERTISED = "hz_advertised"
 
-ATTR_BRAND = 'Brand'
-ATTR_HZ = 'GHz Advertised'
-ATTR_ARCH = 'arch'
+DEFAULT_NAME = "CPU speed"
 
-HZ_ACTUAL_RAW = 'hz_actual_raw'
-HZ_ADVERTISED_RAW = 'hz_advertised_raw'
+ICON = "mdi:pulse"
 
-DEFAULT_NAME = 'CPU speed'
-
-ICON = 'mdi:pulse'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-})
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string}
+)
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the CPU speed sensor."""
-    name = config.get(CONF_NAME)
-
+    name = config[CONF_NAME]
     add_entities([CpuSpeedSensor(name)], True)
 
 
-class CpuSpeedSensor(Entity):
+class CpuSpeedSensor(SensorEntity):
     """Representation of a CPU sensor."""
 
     def __init__(self, name):
-        """Initialize the sensor."""
+        """Initialize the CPU sensor."""
         self._name = name
         self._state = None
         self.info = None
-        self._unit_of_measurement = 'GHz'
 
     @property
     def name(self):
@@ -56,28 +43,25 @@ class CpuSpeedSensor(Entity):
         return self._name
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
         return self._state
 
     @property
-    def unit_of_measurement(self):
+    def native_unit_of_measurement(self):
         """Return the unit the value is expressed in."""
-        return self._unit_of_measurement
+        return FREQUENCY_GIGAHERTZ
 
     @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the state attributes."""
         if self.info is not None:
             attrs = {
-                ATTR_ARCH: self.info['arch'],
-                ATTR_BRAND: self.info['brand'],
+                ATTR_ARCH: self.info["arch_string_raw"],
+                ATTR_BRAND: self.info["brand_raw"],
             }
-
-            if HZ_ADVERTISED_RAW in self.info:
-                attrs[ATTR_HZ] = round(
-                    self.info[HZ_ADVERTISED_RAW][0] / 10 ** 9, 2
-                )
+            if HZ_ADVERTISED in self.info:
+                attrs[ATTR_HZ] = round(self.info[HZ_ADVERTISED][0] / 10 ** 9, 2)
             return attrs
 
     @property
@@ -87,12 +71,8 @@ class CpuSpeedSensor(Entity):
 
     def update(self):
         """Get the latest data and updates the state."""
-        from cpuinfo import cpuinfo
-
         self.info = cpuinfo.get_cpu_info()
-        if HZ_ACTUAL_RAW in self.info:
-            self._state = round(
-                float(self.info[HZ_ACTUAL_RAW][0]) / 10 ** 9, 2
-            )
+        if HZ_ACTUAL in self.info:
+            self._state = round(float(self.info[HZ_ACTUAL][0]) / 10 ** 9, 2)
         else:
             self._state = None

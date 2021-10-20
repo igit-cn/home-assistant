@@ -1,62 +1,56 @@
 """Support for ESPHome binary sensors."""
-import logging
+from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from aioesphomeapi import BinarySensorInfo, BinarySensorState
 
-from homeassistant.components.binary_sensor import BinarySensorDevice
-from homeassistant.components.esphome import EsphomeEntity, \
-    platform_async_setup_entry
+from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-if TYPE_CHECKING:
-    # pylint: disable=unused-import
-    from aioesphomeapi import BinarySensorInfo, BinarySensorState  # noqa
-
-DEPENDENCIES = ['esphome']
-_LOGGER = logging.getLogger(__name__)
+from . import EsphomeEntity, platform_async_setup_entry
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up ESPHome binary sensors based on a config entry."""
-    # pylint: disable=redefined-outer-name
-    from aioesphomeapi import BinarySensorInfo, BinarySensorState  # noqa
-
     await platform_async_setup_entry(
-        hass, entry, async_add_entities,
-        component_key='binary_sensor',
-        info_type=BinarySensorInfo, entity_type=EsphomeBinarySensor,
-        state_type=BinarySensorState
+        hass,
+        entry,
+        async_add_entities,
+        component_key="binary_sensor",
+        info_type=BinarySensorInfo,
+        entity_type=EsphomeBinarySensor,
+        state_type=BinarySensorState,
     )
 
 
-class EsphomeBinarySensor(EsphomeEntity, BinarySensorDevice):
+class EsphomeBinarySensor(
+    EsphomeEntity[BinarySensorInfo, BinarySensorState], BinarySensorEntity
+):
     """A binary sensor implementation for ESPHome."""
 
     @property
-    def _static_info(self) -> 'BinarySensorInfo':
-        return super()._static_info
-
-    @property
-    def _state(self) -> Optional['BinarySensorState']:
-        return super()._state
-
-    @property
-    def is_on(self):
+    def is_on(self) -> bool | None:
         """Return true if the binary sensor is on."""
         if self._static_info.is_status_binary_sensor:
             # Status binary sensors indicated connected state.
             # So in their case what's usually _availability_ is now state
             return self._entry_data.available
-        if self._state is None:
+        if not self._has_state:
+            return None
+        if self._state.missing_state:
             return None
         return self._state.state
 
     @property
-    def device_class(self):
+    def device_class(self) -> str:
         """Return the class of this device, from component DEVICE_CLASSES."""
         return self._static_info.device_class
 
     @property
-    def available(self):
+    def available(self) -> bool:
         """Return True if entity is available."""
         if self._static_info.is_status_binary_sensor:
             return True

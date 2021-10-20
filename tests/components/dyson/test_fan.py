@@ -1,333 +1,441 @@
 """Test the Dyson fan component."""
-import unittest
-from unittest import mock
+from __future__ import annotations
 
-from homeassistant.setup import setup_component
-from homeassistant.components import dyson as dyson_parent
-from homeassistant.components.dyson import DYSON_DEVICES, fan as dyson
-from homeassistant.components.fan import (ATTR_SPEED, ATTR_SPEED_LIST,
-                                          ATTR_OSCILLATING)
-from tests.common import get_test_home_assistant
-from libpurecoollink.const import FanSpeed, FanMode, NightMode, Oscillation
-from libpurecoollink.dyson_pure_state import DysonPureCoolState
-from libpurecoollink.dyson_pure_cool_link import DysonPureCoolLink
+from libpurecool.const import FanMode, FanSpeed, NightMode, Oscillation
+from libpurecool.dyson_pure_cool import DysonPureCool, DysonPureCoolLink
+from libpurecool.dyson_pure_state import DysonPureCoolState
+from libpurecool.dyson_pure_state_v2 import DysonPureCoolV2State
+import pytest
+
+from homeassistant.components.dyson import DOMAIN
+from homeassistant.components.dyson.fan import (
+    ATTR_ANGLE_HIGH,
+    ATTR_ANGLE_LOW,
+    ATTR_AUTO_MODE,
+    ATTR_CARBON_FILTER,
+    ATTR_DYSON_SPEED,
+    ATTR_DYSON_SPEED_LIST,
+    ATTR_FLOW_DIRECTION_FRONT,
+    ATTR_HEPA_FILTER,
+    ATTR_NIGHT_MODE,
+    ATTR_TIMER,
+    PRESET_MODE_AUTO,
+    SERVICE_SET_ANGLE,
+    SERVICE_SET_AUTO_MODE,
+    SERVICE_SET_DYSON_SPEED,
+    SERVICE_SET_FLOW_DIRECTION_FRONT,
+    SERVICE_SET_NIGHT_MODE,
+    SERVICE_SET_TIMER,
+)
+from homeassistant.components.fan import (
+    ATTR_OSCILLATING,
+    ATTR_PERCENTAGE,
+    ATTR_PRESET_MODE,
+    ATTR_SPEED,
+    ATTR_SPEED_LIST,
+    DOMAIN as PLATFORM_DOMAIN,
+    SERVICE_OSCILLATE,
+    SERVICE_SET_SPEED,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    SPEED_HIGH,
+    SPEED_LOW,
+    SPEED_MEDIUM,
+    SPEED_OFF,
+    SUPPORT_OSCILLATE,
+    SUPPORT_SET_SPEED,
+)
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    ATTR_SUPPORTED_FEATURES,
+    STATE_OFF,
+    STATE_ON,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
+
+from .common import (
+    ENTITY_NAME,
+    NAME,
+    SERIAL,
+    async_get_purecool_device,
+    async_get_purecoollink_device,
+    async_update_device,
+)
+
+ENTITY_ID = f"{PLATFORM_DOMAIN}.{ENTITY_NAME}"
 
 
-class MockDysonState(DysonPureCoolState):
-    """Mock Dyson state."""
-
-    def __init__(self):
-        """Create new Mock Dyson State."""
-        pass
-
-
-def _get_device_with_no_state():
-    """Return a device with no state."""
-    device = mock.Mock()
-    device.name = "Device_name"
-    device.state = None
-    return device
+@callback
+def async_get_device(spec: type[DysonPureCoolLink]) -> DysonPureCoolLink:
+    """Return a Dyson fan device."""
+    if spec == DysonPureCoolLink:
+        return async_get_purecoollink_device()
+    return async_get_purecool_device()
 
 
-def _get_device_off():
-    """Return a device with state off."""
-    device = mock.Mock()
-    device.name = "Device_name"
-    device.state = mock.Mock()
-    device.state.fan_mode = "OFF"
-    device.state.night_mode = "ON"
-    device.state.speed = "0004"
-    return device
+@pytest.mark.parametrize("device", [DysonPureCoolLink], indirect=True)
+async def test_state_purecoollink(
+    hass: HomeAssistant, device: DysonPureCoolLink
+) -> None:
+    """Test the state of a PureCoolLink fan."""
+    entity_registry = er.async_get(hass)
+    assert entity_registry.async_get(ENTITY_ID).unique_id == SERIAL
 
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_ON
+    assert state.name == NAME
+    attributes = state.attributes
+    assert attributes[ATTR_NIGHT_MODE] is True
+    assert attributes[ATTR_OSCILLATING] is True
+    assert attributes[ATTR_PERCENTAGE] == 10
+    assert attributes[ATTR_PRESET_MODE] is None
+    assert attributes[ATTR_SPEED] == SPEED_LOW
+    assert attributes[ATTR_SPEED_LIST] == [
+        SPEED_OFF,
+        SPEED_LOW,
+        SPEED_MEDIUM,
+        SPEED_HIGH,
+        PRESET_MODE_AUTO,
+    ]
+    assert attributes[ATTR_DYSON_SPEED] == 1
+    assert attributes[ATTR_DYSON_SPEED_LIST] == list(range(1, 11))
+    assert attributes[ATTR_AUTO_MODE] is False
+    assert attributes[ATTR_SUPPORTED_FEATURES] == SUPPORT_OSCILLATE | SUPPORT_SET_SPEED
 
-def _get_device_auto():
-    """Return a device with state auto."""
-    device = mock.Mock()
-    device.name = "Device_name"
-    device.state = mock.Mock()
-    device.state.fan_mode = "AUTO"
-    device.state.night_mode = "ON"
-    device.state.speed = "AUTO"
-    return device
+    device.state.fan_mode = FanMode.OFF.value
+    await async_update_device(hass, device, DysonPureCoolState)
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_OFF
 
-
-def _get_device_on():
-    """Return a valid state on."""
-    device = mock.Mock(spec=DysonPureCoolLink)
-    device.name = "Device_name"
-    device.state = mock.Mock()
-    device.state.fan_mode = "FAN"
-    device.state.fan_state = "FAN"
-    device.state.oscillation = "ON"
+    device.state.fan_mode = FanMode.AUTO.value
+    device.state.speed = FanSpeed.FAN_SPEED_AUTO.value
     device.state.night_mode = "OFF"
-    device.state.speed = "0001"
-    return device
+    device.state.oscillation = "OFF"
+    await async_update_device(hass, device, DysonPureCoolState)
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_ON
+    attributes = state.attributes
+    assert attributes[ATTR_NIGHT_MODE] is False
+    assert attributes[ATTR_OSCILLATING] is False
+    assert attributes[ATTR_PERCENTAGE] is None
+    assert attributes[ATTR_PRESET_MODE] == "auto"
+    assert attributes[ATTR_SPEED] == PRESET_MODE_AUTO
+    assert attributes[ATTR_DYSON_SPEED] == "AUTO"
+    assert attributes[ATTR_AUTO_MODE] is True
 
 
-class DysonTest(unittest.TestCase):
-    """Dyson Sensor component test class."""
+@pytest.mark.parametrize("device", [DysonPureCool], indirect=True)
+async def test_state_purecool(hass: HomeAssistant, device: DysonPureCool) -> None:
+    """Test the state of a PureCool fan."""
+    entity_registry = er.async_get(hass)
+    assert entity_registry.async_get(ENTITY_ID).unique_id == SERIAL
 
-    def setUp(self):  # pylint: disable=invalid-name
-        """Set up things to be run when tests are started."""
-        self.hass = get_test_home_assistant()
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_ON
+    assert state.name == NAME
+    attributes = state.attributes
+    assert attributes[ATTR_NIGHT_MODE] is True
+    assert attributes[ATTR_OSCILLATING] is True
+    assert attributes[ATTR_ANGLE_LOW] == 24
+    assert attributes[ATTR_ANGLE_HIGH] == 254
+    assert attributes[ATTR_PERCENTAGE] == 10
+    assert attributes[ATTR_PRESET_MODE] is None
+    assert attributes[ATTR_SPEED] == SPEED_LOW
+    assert attributes[ATTR_SPEED_LIST] == [
+        SPEED_OFF,
+        SPEED_LOW,
+        SPEED_MEDIUM,
+        SPEED_HIGH,
+        PRESET_MODE_AUTO,
+    ]
+    assert attributes[ATTR_DYSON_SPEED] == 1
+    assert attributes[ATTR_DYSON_SPEED_LIST] == list(range(1, 11))
+    assert attributes[ATTR_AUTO_MODE] is False
+    assert attributes[ATTR_FLOW_DIRECTION_FRONT] is True
+    assert attributes[ATTR_TIMER] == "OFF"
+    assert attributes[ATTR_HEPA_FILTER] == 100
+    assert attributes[ATTR_CARBON_FILTER] == 100
+    assert attributes[ATTR_SUPPORTED_FEATURES] == SUPPORT_OSCILLATE | SUPPORT_SET_SPEED
 
-    def tearDown(self):  # pylint: disable=invalid-name
-        """Stop everything that was started."""
-        self.hass.stop()
+    device.state.auto_mode = "ON"
+    device.state.night_mode = "OFF"
+    device.state.oscillation = "OIOF"
+    device.state.speed = "AUTO"
+    device.state.front_direction = "OFF"
+    device.state.sleep_timer = "0120"
+    device.state.carbon_filter_state = "INV"
+    await async_update_device(hass, device, DysonPureCoolV2State)
+    state = hass.states.get(ENTITY_ID)
+    attributes = state.attributes
+    assert attributes[ATTR_NIGHT_MODE] is False
+    assert attributes[ATTR_OSCILLATING] is False
+    assert attributes[ATTR_PERCENTAGE] is None
+    assert attributes[ATTR_PRESET_MODE] == "auto"
+    assert attributes[ATTR_SPEED] == PRESET_MODE_AUTO
+    assert attributes[ATTR_DYSON_SPEED] == "AUTO"
+    assert attributes[ATTR_AUTO_MODE] is True
+    assert attributes[ATTR_FLOW_DIRECTION_FRONT] is False
+    assert attributes[ATTR_TIMER] == "0120"
+    assert attributes[ATTR_CARBON_FILTER] == "INV"
 
-    def test_setup_component_with_no_devices(self):
-        """Test setup component with no devices."""
-        self.hass.data[dyson.DYSON_DEVICES] = []
-        add_entities = mock.MagicMock()
-        dyson.setup_platform(self.hass, None, add_entities)
-        add_entities.assert_called_with([])
+    device.state.fan_power = "OFF"
+    await async_update_device(hass, device, DysonPureCoolV2State)
+    state = hass.states.get(ENTITY_ID)
+    assert state.state == STATE_OFF
 
-    def test_setup_component(self):
-        """Test setup component with devices."""
-        def _add_device(devices):
-            assert len(devices) == 1
-            assert devices[0].name == "Device_name"
 
-        device_fan = _get_device_on()
-        device_non_fan = _get_device_off()
+@pytest.mark.parametrize(
+    "service,service_data,configuration_args",
+    [
+        (SERVICE_TURN_ON, {}, {"fan_mode": FanMode.FAN}),
+        (
+            SERVICE_TURN_ON,
+            {ATTR_SPEED: SPEED_LOW},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_4},
+        ),
+        (
+            SERVICE_TURN_ON,
+            {ATTR_PERCENTAGE: 40},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_4},
+        ),
+        (SERVICE_TURN_OFF, {}, {"fan_mode": FanMode.OFF}),
+        (
+            SERVICE_OSCILLATE,
+            {ATTR_OSCILLATING: True},
+            {"oscillation": Oscillation.OSCILLATION_ON},
+        ),
+        (
+            SERVICE_OSCILLATE,
+            {ATTR_OSCILLATING: False},
+            {"oscillation": Oscillation.OSCILLATION_OFF},
+        ),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_LOW},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_4},
+        ),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_MEDIUM},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_7},
+        ),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_HIGH},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_10},
+        ),
+    ],
+)
+@pytest.mark.parametrize("device", [DysonPureCoolLink], indirect=True)
+async def test_commands_purecoollink(
+    hass: HomeAssistant,
+    device: DysonPureCoolLink,
+    service: str,
+    service_data: dict,
+    configuration_args: dict,
+) -> None:
+    """Test sending commands to a PureCoolLink fan."""
+    await hass.services.async_call(
+        PLATFORM_DOMAIN,
+        service,
+        {
+            ATTR_ENTITY_ID: ENTITY_ID,
+            **service_data,
+        },
+        blocking=True,
+    )
+    device.set_configuration.assert_called_once_with(**configuration_args)
 
-        self.hass.data[dyson.DYSON_DEVICES] = [device_fan, device_non_fan]
-        dyson.setup_platform(self.hass, None, _add_device)
 
-    @mock.patch('libpurecoollink.dyson.DysonAccount.devices',
-                return_value=[_get_device_on()])
-    @mock.patch('libpurecoollink.dyson.DysonAccount.login', return_value=True)
-    def test_get_state_attributes(self, mocked_login, mocked_devices):
-        """Test async added to hass."""
-        setup_component(self.hass, dyson_parent.DOMAIN, {
-            dyson_parent.DOMAIN: {
-                dyson_parent.CONF_USERNAME: "email",
-                dyson_parent.CONF_PASSWORD: "password",
-                dyson_parent.CONF_LANGUAGE: "US",
-                }
-            })
-        self.hass.block_till_done()
-        state = self.hass.states.get("{}.{}".format(
-            dyson.DOMAIN,
-            mocked_devices.return_value[0].name))
+@pytest.mark.parametrize(
+    "service,service_data,command,command_args",
+    [
+        (SERVICE_TURN_ON, {}, "turn_on", []),
+        (
+            SERVICE_TURN_ON,
+            {ATTR_SPEED: SPEED_LOW},
+            "set_fan_speed",
+            [FanSpeed.FAN_SPEED_4],
+        ),
+        (
+            SERVICE_TURN_ON,
+            {ATTR_PERCENTAGE: 40},
+            "set_fan_speed",
+            [FanSpeed.FAN_SPEED_4],
+        ),
+        (
+            SERVICE_TURN_ON,
+            {ATTR_PRESET_MODE: "auto"},
+            "enable_auto_mode",
+            [],
+        ),
+        (SERVICE_TURN_OFF, {}, "turn_off", []),
+        (SERVICE_OSCILLATE, {ATTR_OSCILLATING: True}, "enable_oscillation", []),
+        (SERVICE_OSCILLATE, {ATTR_OSCILLATING: False}, "disable_oscillation", []),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_LOW},
+            "set_fan_speed",
+            [FanSpeed.FAN_SPEED_4],
+        ),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_MEDIUM},
+            "set_fan_speed",
+            [FanSpeed.FAN_SPEED_7],
+        ),
+        (
+            SERVICE_SET_SPEED,
+            {ATTR_SPEED: SPEED_HIGH},
+            "set_fan_speed",
+            [FanSpeed.FAN_SPEED_10],
+        ),
+    ],
+)
+@pytest.mark.parametrize("device", [DysonPureCool], indirect=True)
+async def test_commands_purecool(
+    hass: HomeAssistant,
+    device: DysonPureCool,
+    service: str,
+    service_data: dict,
+    command: str,
+    command_args: list,
+) -> None:
+    """Test sending commands to a PureCool fan."""
+    await hass.services.async_call(
+        PLATFORM_DOMAIN,
+        service,
+        {
+            ATTR_ENTITY_ID: ENTITY_ID,
+            **service_data,
+        },
+        blocking=True,
+    )
+    getattr(device, command).assert_called_once_with(*command_args)
 
-        assert dyson.ATTR_IS_NIGHT_MODE in state.attributes
-        assert dyson.ATTR_IS_AUTO_MODE in state.attributes
-        assert ATTR_SPEED in state.attributes
-        assert ATTR_SPEED_LIST in state.attributes
-        assert ATTR_OSCILLATING in state.attributes
 
-    @mock.patch('libpurecoollink.dyson.DysonAccount.devices',
-                return_value=[_get_device_on()])
-    @mock.patch('libpurecoollink.dyson.DysonAccount.login', return_value=True)
-    def test_async_added_to_hass(self, mocked_login, mocked_devices):
-        """Test async added to hass."""
-        setup_component(self.hass, dyson_parent.DOMAIN, {
-            dyson_parent.DOMAIN: {
-                dyson_parent.CONF_USERNAME: "email",
-                dyson_parent.CONF_PASSWORD: "password",
-                dyson_parent.CONF_LANGUAGE: "US",
-                }
-            })
-        self.hass.block_till_done()
-        assert len(self.hass.data[dyson.DYSON_DEVICES]) == 1
-        assert mocked_devices.return_value[0].add_message_listener.called
+@pytest.mark.parametrize(
+    "service,service_data,configuration_args",
+    [
+        (
+            SERVICE_SET_NIGHT_MODE,
+            {ATTR_NIGHT_MODE: True},
+            {"night_mode": NightMode.NIGHT_MODE_ON},
+        ),
+        (
+            SERVICE_SET_NIGHT_MODE,
+            {ATTR_NIGHT_MODE: False},
+            {"night_mode": NightMode.NIGHT_MODE_OFF},
+        ),
+        (SERVICE_SET_AUTO_MODE, {"auto_mode": True}, {"fan_mode": FanMode.AUTO}),
+        (SERVICE_SET_AUTO_MODE, {"auto_mode": False}, {"fan_mode": FanMode.FAN}),
+        (
+            SERVICE_SET_DYSON_SPEED,
+            {ATTR_DYSON_SPEED: "4"},
+            {"fan_mode": FanMode.FAN, "fan_speed": FanSpeed.FAN_SPEED_4},
+        ),
+    ],
+)
+@pytest.mark.parametrize("device", [DysonPureCoolLink], indirect=True)
+async def test_custom_services_purecoollink(
+    hass: HomeAssistant,
+    device: DysonPureCoolLink,
+    service: str,
+    service_data: dict,
+    configuration_args: dict,
+) -> None:
+    """Test custom services of a PureCoolLink fan."""
+    await hass.services.async_call(
+        DOMAIN,
+        service,
+        {
+            ATTR_ENTITY_ID: ENTITY_ID,
+            **service_data,
+        },
+        blocking=True,
+    )
+    device.set_configuration.assert_called_once_with(**configuration_args)
 
-    def test_dyson_set_speed(self):
-        """Test set fan speed."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.set_speed("1")
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.FAN,
-                                      fan_speed=FanSpeed.FAN_SPEED_1)
 
-        component.set_speed("AUTO")
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.AUTO)
+@pytest.mark.parametrize(
+    "service,service_data,command,command_args",
+    [
+        (SERVICE_SET_NIGHT_MODE, {ATTR_NIGHT_MODE: True}, "enable_night_mode", []),
+        (SERVICE_SET_NIGHT_MODE, {ATTR_NIGHT_MODE: False}, "disable_night_mode", []),
+        (SERVICE_SET_AUTO_MODE, {ATTR_AUTO_MODE: True}, "enable_auto_mode", []),
+        (SERVICE_SET_AUTO_MODE, {ATTR_AUTO_MODE: False}, "disable_auto_mode", []),
+        (SERVICE_SET_AUTO_MODE, {ATTR_AUTO_MODE: False}, "disable_auto_mode", []),
+        (
+            SERVICE_SET_ANGLE,
+            {ATTR_ANGLE_LOW: 10, ATTR_ANGLE_HIGH: 200},
+            "enable_oscillation",
+            [10, 200],
+        ),
+        (
+            SERVICE_SET_FLOW_DIRECTION_FRONT,
+            {ATTR_FLOW_DIRECTION_FRONT: True},
+            "enable_frontal_direction",
+            [],
+        ),
+        (
+            SERVICE_SET_FLOW_DIRECTION_FRONT,
+            {ATTR_FLOW_DIRECTION_FRONT: False},
+            "disable_frontal_direction",
+            [],
+        ),
+        (SERVICE_SET_TIMER, {ATTR_TIMER: 0}, "disable_sleep_timer", []),
+        (SERVICE_SET_TIMER, {ATTR_TIMER: 10}, "enable_sleep_timer", [10]),
+        (
+            SERVICE_SET_DYSON_SPEED,
+            {ATTR_DYSON_SPEED: "4"},
+            "set_fan_speed",
+            [FanSpeed("0004")],
+        ),
+    ],
+)
+@pytest.mark.parametrize("device", [DysonPureCool], indirect=True)
+async def test_custom_services_purecool(
+    hass: HomeAssistant,
+    device: DysonPureCool,
+    service: str,
+    service_data: dict,
+    command: str,
+    command_args: list,
+) -> None:
+    """Test custom services of a PureCool fan."""
+    await hass.services.async_call(
+        DOMAIN,
+        service,
+        {
+            ATTR_ENTITY_ID: ENTITY_ID,
+            **service_data,
+        },
+        blocking=True,
+    )
+    getattr(device, command).assert_called_once_with(*command_args)
 
-    def test_dyson_turn_on(self):
-        """Test turn on fan."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.turn_on()
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.FAN)
 
-    def test_dyson_turn_night_mode(self):
-        """Test turn on fan with night mode."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.night_mode(True)
-        set_config = device.set_configuration
-        set_config.assert_called_with(night_mode=NightMode.NIGHT_MODE_ON)
-
-        component.night_mode(False)
-        set_config = device.set_configuration
-        set_config.assert_called_with(night_mode=NightMode.NIGHT_MODE_OFF)
-
-    def test_is_night_mode(self):
-        """Test night mode."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.is_night_mode
-
-        device = _get_device_off()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.is_night_mode
-
-    def test_dyson_turn_auto_mode(self):
-        """Test turn on/off fan with auto mode."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.auto_mode(True)
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.AUTO)
-
-        component.auto_mode(False)
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.FAN)
-
-    def test_is_auto_mode(self):
-        """Test auto mode."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.is_auto_mode
-
-        device = _get_device_auto()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.is_auto_mode
-
-    def test_dyson_turn_on_speed(self):
-        """Test turn on fan with specified speed."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.turn_on("1")
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.FAN,
-                                      fan_speed=FanSpeed.FAN_SPEED_1)
-
-        component.turn_on("AUTO")
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.AUTO)
-
-    def test_dyson_turn_off(self):
-        """Test turn off fan."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.should_poll
-        component.turn_off()
-        set_config = device.set_configuration
-        set_config.assert_called_with(fan_mode=FanMode.OFF)
-
-    def test_dyson_oscillate_off(self):
-        """Test turn off oscillation."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        component.oscillate(False)
-        set_config = device.set_configuration
-        set_config.assert_called_with(oscillation=Oscillation.OSCILLATION_OFF)
-
-    def test_dyson_oscillate_on(self):
-        """Test turn on oscillation."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        component.oscillate(True)
-        set_config = device.set_configuration
-        set_config.assert_called_with(oscillation=Oscillation.OSCILLATION_ON)
-
-    def test_dyson_oscillate_value_on(self):
-        """Test get oscillation value on."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.oscillating
-
-    def test_dyson_oscillate_value_off(self):
-        """Test get oscillation value off."""
-        device = _get_device_off()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.oscillating
-
-    def test_dyson_on(self):
-        """Test device is on."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.is_on
-
-    def test_dyson_off(self):
-        """Test device is off."""
-        device = _get_device_off()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.is_on
-
-        device = _get_device_with_no_state()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert not component.is_on
-
-    def test_dyson_get_speed(self):
-        """Test get device speed."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.speed == 1
-
-        device = _get_device_off()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.speed == 4
-
-        device = _get_device_with_no_state()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.speed is None
-
-        device = _get_device_auto()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.speed == "AUTO"
-
-    def test_dyson_get_direction(self):
-        """Test get device direction."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.current_direction is None
-
-    def test_dyson_get_speed_list(self):
-        """Test get speeds list."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert len(component.speed_list) == 11
-
-    def test_dyson_supported_features(self):
-        """Test supported features."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        assert component.supported_features == 3
-
-    def test_on_message(self):
-        """Test when message is received."""
-        device = _get_device_on()
-        component = dyson.DysonPureCoolLinkDevice(self.hass, device)
-        component.entity_id = "entity_id"
-        component.schedule_update_ha_state = mock.Mock()
-        component.on_message(MockDysonState())
-        component.schedule_update_ha_state.assert_called_with()
-
-    def test_service_set_night_mode(self):
-        """Test set night mode service."""
-        dyson_device = mock.MagicMock()
-        self.hass.data[DYSON_DEVICES] = []
-        dyson_device.entity_id = 'fan.living_room'
-        self.hass.data[dyson.DYSON_FAN_DEVICES] = [dyson_device]
-        dyson.setup_platform(self.hass, None, mock.MagicMock())
-
-        self.hass.services.call(dyson.DOMAIN, dyson.SERVICE_SET_NIGHT_MODE,
-                                {"entity_id": "fan.bed_room",
-                                 "night_mode": True}, True)
-        assert not dyson_device.night_mode.called
-
-        self.hass.services.call(dyson.DOMAIN, dyson.SERVICE_SET_NIGHT_MODE,
-                                {"entity_id": "fan.living_room",
-                                 "night_mode": True}, True)
-        dyson_device.night_mode.assert_called_with(True)
+@pytest.mark.parametrize(
+    "domain,service,data",
+    [
+        (PLATFORM_DOMAIN, SERVICE_TURN_ON, {ATTR_SPEED: "AUTO"}),
+        (PLATFORM_DOMAIN, SERVICE_SET_SPEED, {ATTR_SPEED: "AUTO"}),
+        (DOMAIN, SERVICE_SET_DYSON_SPEED, {ATTR_DYSON_SPEED: "11"}),
+    ],
+)
+@pytest.mark.parametrize("device", [DysonPureCool], indirect=True)
+async def test_custom_services_invalid_data(
+    hass: HomeAssistant, device: DysonPureCool, domain: str, service: str, data: dict
+) -> None:
+    """Test custom services calling with invalid data."""
+    with pytest.raises(ValueError):
+        await hass.services.async_call(
+            domain,
+            service,
+            {
+                ATTR_ENTITY_ID: ENTITY_ID,
+                **data,
+            },
+            blocking=True,
+        )

@@ -1,145 +1,220 @@
 """Support for scanning a network with nmap."""
+from __future__ import annotations
+
+from collections.abc import Callable
 import logging
-import re
-import subprocess
-from collections import namedtuple
-from datetime import timedelta
+from typing import Any
 
 import voluptuous as vol
 
-import homeassistant.helpers.config_validation as cv
-import homeassistant.util.dt as dt_util
 from homeassistant.components.device_tracker import (
-    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
-from homeassistant.const import CONF_HOSTS
+    DOMAIN as DEVICE_TRACKER_DOMAIN,
+    PLATFORM_SCHEMA as DEVICE_TRACKER_PLATFORM_SCHEMA,
+    SOURCE_TYPE_ROUTER,
+)
+from homeassistant.components.device_tracker.config_entry import ScannerEntity
+from homeassistant.components.device_tracker.const import (
+    CONF_CONSIDER_HOME,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_CONSIDER_HOME,
+)
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import CONF_EXCLUDE, CONF_HOSTS
+from homeassistant.core import HomeAssistant, callback
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.typing import ConfigType
 
-REQUIREMENTS = ['python-nmap==0.6.1']
+from . import NmapDevice, NmapDeviceScanner, short_hostname, signal_device_update
+from .const import (
+    CONF_HOME_INTERVAL,
+    CONF_OPTIONS,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    TRACKER_SCAN_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_EXCLUDE = 'exclude'
-# Interval in minutes to exclude devices from a scan while they are home
-CONF_HOME_INTERVAL = 'home_interval'
-CONF_OPTIONS = 'scan_options'
-DEFAULT_OPTIONS = '-F --host-timeout 5s'
+
+PLATFORM_SCHEMA = DEVICE_TRACKER_PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_HOSTS): cv.ensure_list,
+        vol.Required(CONF_HOME_INTERVAL, default=0): cv.positive_int,
+        vol.Required(
+            CONF_CONSIDER_HOME, default=DEFAULT_CONSIDER_HOME.total_seconds()
+        ): cv.time_period,
+        vol.Optional(CONF_EXCLUDE, default=[]): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_OPTIONS, default=DEFAULT_OPTIONS): cv.string,
+    }
+)
 
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_HOSTS): cv.ensure_list,
-    vol.Required(CONF_HOME_INTERVAL, default=0): cv.positive_int,
-    vol.Optional(CONF_EXCLUDE, default=[]):
-        vol.All(cv.ensure_list, [cv.string]),
-    vol.Optional(CONF_OPTIONS, default=DEFAULT_OPTIONS):
-        cv.string
-})
-
-
-def get_scanner(hass, config):
+async def async_get_scanner(hass: HomeAssistant, config: ConfigType) -> None:
     """Validate the configuration and return a Nmap scanner."""
-    return NmapDeviceScanner(config[DOMAIN])
+    validated_config = config[DEVICE_TRACKER_DOMAIN]
+
+    if CONF_SCAN_INTERVAL in validated_config:
+        scan_interval = validated_config[CONF_SCAN_INTERVAL].total_seconds()
+    else:
+        scan_interval = TRACKER_SCAN_INTERVAL
+
+    if CONF_CONSIDER_HOME in validated_config:
+        consider_home = validated_config[CONF_CONSIDER_HOME].total_seconds()
+    else:
+        consider_home = DEFAULT_CONSIDER_HOME.total_seconds()
+
+    import_config = {
+        CONF_HOSTS: ",".join(validated_config[CONF_HOSTS]),
+        CONF_HOME_INTERVAL: validated_config[CONF_HOME_INTERVAL],
+        CONF_CONSIDER_HOME: consider_home,
+        CONF_EXCLUDE: ",".join(validated_config[CONF_EXCLUDE]),
+        CONF_OPTIONS: validated_config[CONF_OPTIONS],
+        CONF_SCAN_INTERVAL: scan_interval,
+    }
+
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_IMPORT},
+            data=import_config,
+        )
+    )
+
+    _LOGGER.warning(
+        "Your Nmap Tracker configuration has been imported into the UI, "
+        "please remove it from configuration.yaml. "
+    )
 
 
-Device = namedtuple('Device', ['mac', 'name', 'ip', 'last_update'])
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: Callable
+) -> None:
+    """Set up device tracker for Nmap Tracker component."""
+    nmap_tracker = hass.data[DOMAIN][entry.entry_id]
+
+    @callback
+    def device_new(mac_address):
+        """Signal a new device."""
+        async_add_entities([NmapTrackerEntity(nmap_tracker, mac_address, True)])
+
+    @callback
+    def device_missing(mac_address):
+        """Signal a missing device."""
+        async_add_entities([NmapTrackerEntity(nmap_tracker, mac_address, False)])
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, nmap_tracker.signal_device_new, device_new)
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, nmap_tracker.signal_device_missing, device_missing
+        )
+    )
 
 
-def _arp(ip_address):
-    """Get the MAC address for a given IP."""
-    cmd = ['arp', '-n', ip_address]
-    arp = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    out, _ = arp.communicate()
-    match = re.search(r'(([0-9A-Fa-f]{1,2}\:){5}[0-9A-Fa-f]{1,2})', str(out))
-    if match:
-        return match.group(0)
-    _LOGGER.info('No MAC address found for %s', ip_address)
-    return None
+class NmapTrackerEntity(ScannerEntity):
+    """An Nmap Tracker entity."""
 
+    def __init__(
+        self, nmap_tracker: NmapDeviceScanner, mac_address: str, active: bool
+    ) -> None:
+        """Initialize an nmap tracker entity."""
+        self._mac_address = mac_address
+        self._nmap_tracker = nmap_tracker
+        self._tracked = self._nmap_tracker.devices.tracked
+        self._active = active
 
-class NmapDeviceScanner(DeviceScanner):
-    """This class scans for devices using nmap."""
+    @property
+    def _device(self) -> NmapDevice:
+        """Get latest device state."""
+        return self._tracked[self._mac_address]
 
-    exclude = []
+    @property
+    def is_connected(self) -> bool:
+        """Return device status."""
+        return self._active
 
-    def __init__(self, config):
-        """Initialize the scanner."""
-        self.last_results = []
+    @property
+    def name(self) -> str:
+        """Return device name."""
+        return self._device.name
 
-        self.hosts = config[CONF_HOSTS]
-        self.exclude = config[CONF_EXCLUDE]
-        minutes = config[CONF_HOME_INTERVAL]
-        self._options = config[CONF_OPTIONS]
-        self.home_interval = timedelta(minutes=minutes)
+    @property
+    def unique_id(self) -> str:
+        """Return device unique id."""
+        return self._mac_address
 
-        _LOGGER.debug("Scanner initialized")
+    @property
+    def ip_address(self) -> str:
+        """Return the primary ip address of the device."""
+        return self._device.ipv4
 
-    def scan_devices(self):
-        """Scan for new devices and return a list with found device IDs."""
-        self._update_info()
+    @property
+    def mac_address(self) -> str:
+        """Return the mac address of the device."""
+        return self._mac_address
 
-        _LOGGER.debug("Nmap last results %s", self.last_results)
+    @property
+    def hostname(self) -> str | None:
+        """Return hostname of the device."""
+        if not self._device.hostname:
+            return None
+        return short_hostname(self._device.hostname)
 
-        return [device.mac for device in self.last_results]
+    @property
+    def source_type(self) -> str:
+        """Return tracker source type."""
+        return SOURCE_TYPE_ROUTER
 
-    def get_device_name(self, device):
-        """Return the name of the given device or None if we don't know."""
-        filter_named = [result.name for result in self.last_results
-                        if result.mac == device]
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return the device information."""
+        return {
+            "connections": {(CONNECTION_NETWORK_MAC, self._mac_address)},
+            "default_manufacturer": self._device.manufacturer,
+            "default_name": self.name,
+        }
 
-        if filter_named:
-            return filter_named[0]
-        return None
+    @property
+    def should_poll(self) -> bool:
+        """No polling needed."""
+        return False
 
-    def get_extra_attributes(self, device):
-        """Return the IP of the given device."""
-        filter_ip = next((
-            result.ip for result in self.last_results
-            if result.mac == device), None)
-        return {'ip': filter_ip}
+    @property
+    def icon(self) -> str:
+        """Return device icon."""
+        return "mdi:lan-connect" if self._active else "mdi:lan-disconnect"
 
-    def _update_info(self):
-        """Scan the network for devices.
+    @callback
+    def async_process_update(self, online: bool) -> None:
+        """Update device."""
+        self._active = online
 
-        Returns boolean if scanning successful.
-        """
-        _LOGGER.debug("Scanning...")
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the attributes."""
+        return {
+            "last_time_reachable": self._device.last_update.isoformat(
+                timespec="seconds"
+            ),
+            "reason": self._device.reason,
+        }
 
-        from nmap import PortScanner, PortScannerError
-        scanner = PortScanner()
+    @callback
+    def async_on_demand_update(self, online: bool) -> None:
+        """Update state."""
+        self.async_process_update(online)
+        self.async_write_ha_state()
 
-        options = self._options
-
-        if self.home_interval:
-            boundary = dt_util.now() - self.home_interval
-            last_results = [device for device in self.last_results
-                            if device.last_update > boundary]
-            if last_results:
-                exclude_hosts = self.exclude + [device.ip for device
-                                                in last_results]
-            else:
-                exclude_hosts = self.exclude
-        else:
-            last_results = []
-            exclude_hosts = self.exclude
-        if exclude_hosts:
-            options += ' --exclude {}'.format(','.join(exclude_hosts))
-
-        try:
-            result = scanner.scan(hosts=' '.join(self.hosts),
-                                  arguments=options)
-        except PortScannerError:
-            return False
-
-        now = dt_util.now()
-        for ipv4, info in result['scan'].items():
-            if info['status']['state'] != 'up':
-                continue
-            name = info['hostnames'][0]['name'] if info['hostnames'] else ipv4
-            # Mac address only returned if nmap ran as root
-            mac = info['addresses'].get('mac') or _arp(ipv4)
-            if mac is None:
-                continue
-            last_results.append(Device(mac.upper(), name, ipv4, now))
-
-        self.last_results = last_results
-
-        _LOGGER.debug("nmap scan successful")
-        return True
+    async def async_added_to_hass(self) -> None:
+        """Register state update callback."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_device_update(self._mac_address),
+                self.async_on_demand_update,
+            )
+        )

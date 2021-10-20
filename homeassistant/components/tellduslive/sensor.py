@@ -1,57 +1,110 @@
 """Support for Tellstick Net/Telstick Live sensors."""
-import logging
+from __future__ import annotations
 
 from homeassistant.components import sensor, tellduslive
-from homeassistant.components.tellduslive.entry import TelldusLiveEntity
+from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.const import (
-    DEVICE_CLASS_HUMIDITY, DEVICE_CLASS_ILLUMINANCE, DEVICE_CLASS_TEMPERATURE,
-    TEMP_CELSIUS, POWER_WATT)
+    DEVICE_CLASS_HUMIDITY,
+    DEVICE_CLASS_ILLUMINANCE,
+    DEVICE_CLASS_TEMPERATURE,
+    LENGTH_MILLIMETERS,
+    LIGHT_LUX,
+    PERCENTAGE,
+    POWER_WATT,
+    PRECIPITATION_MILLIMETERS_PER_HOUR,
+    SPEED_METERS_PER_SECOND,
+    TEMP_CELSIUS,
+    UV_INDEX,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-_LOGGER = logging.getLogger(__name__)
+from .entry import TelldusLiveEntity
 
-SENSOR_TYPE_TEMPERATURE = 'temp'
-SENSOR_TYPE_HUMIDITY = 'humidity'
-SENSOR_TYPE_RAINRATE = 'rrate'
-SENSOR_TYPE_RAINTOTAL = 'rtot'
-SENSOR_TYPE_WINDDIRECTION = 'wdir'
-SENSOR_TYPE_WINDAVERAGE = 'wavg'
-SENSOR_TYPE_WINDGUST = 'wgust'
-SENSOR_TYPE_UV = 'uv'
-SENSOR_TYPE_WATT = 'watt'
-SENSOR_TYPE_LUMINANCE = 'lum'
-SENSOR_TYPE_DEW_POINT = 'dewp'
-SENSOR_TYPE_BAROMETRIC_PRESSURE = 'barpress'
+SENSOR_TYPE_TEMPERATURE = "temp"
+SENSOR_TYPE_HUMIDITY = "humidity"
+SENSOR_TYPE_RAINRATE = "rrate"
+SENSOR_TYPE_RAINTOTAL = "rtot"
+SENSOR_TYPE_WINDDIRECTION = "wdir"
+SENSOR_TYPE_WINDAVERAGE = "wavg"
+SENSOR_TYPE_WINDGUST = "wgust"
+SENSOR_TYPE_UV = "uv"
+SENSOR_TYPE_WATT = "watt"
+SENSOR_TYPE_LUMINANCE = "lum"
+SENSOR_TYPE_DEW_POINT = "dewp"
+SENSOR_TYPE_BAROMETRIC_PRESSURE = "barpress"
 
-SENSOR_TYPES = {
-    SENSOR_TYPE_TEMPERATURE:
-    ['Temperature', TEMP_CELSIUS, None, DEVICE_CLASS_TEMPERATURE],
-    SENSOR_TYPE_HUMIDITY: ['Humidity', '%', None, DEVICE_CLASS_HUMIDITY],
-    SENSOR_TYPE_RAINRATE: ['Rain rate', 'mm/h', 'mdi:water', None],
-    SENSOR_TYPE_RAINTOTAL: ['Rain total', 'mm', 'mdi:water', None],
-    SENSOR_TYPE_WINDDIRECTION: ['Wind direction', '', '', None],
-    SENSOR_TYPE_WINDAVERAGE: ['Wind average', 'm/s', '', None],
-    SENSOR_TYPE_WINDGUST: ['Wind gust', 'm/s', '', None],
-    SENSOR_TYPE_UV: ['UV', 'UV', '', None],
-    SENSOR_TYPE_WATT: ['Power', POWER_WATT, '', None],
-    SENSOR_TYPE_LUMINANCE: ['Luminance', 'lx', None, DEVICE_CLASS_ILLUMINANCE],
-    SENSOR_TYPE_DEW_POINT:
-    ['Dew Point', TEMP_CELSIUS, None, DEVICE_CLASS_TEMPERATURE],
-    SENSOR_TYPE_BAROMETRIC_PRESSURE: ['Barometric Pressure', 'kPa', '', None],
+SENSOR_TYPES: dict[str, SensorEntityDescription] = {
+    SENSOR_TYPE_TEMPERATURE: SensorEntityDescription(
+        key=SENSOR_TYPE_TEMPERATURE,
+        name="Temperature",
+        native_unit_of_measurement=TEMP_CELSIUS,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+    ),
+    SENSOR_TYPE_HUMIDITY: SensorEntityDescription(
+        key=SENSOR_TYPE_HUMIDITY,
+        name="Humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=DEVICE_CLASS_HUMIDITY,
+    ),
+    SENSOR_TYPE_RAINRATE: SensorEntityDescription(
+        key=SENSOR_TYPE_RAINRATE,
+        name="Rain rate",
+        native_unit_of_measurement=PRECIPITATION_MILLIMETERS_PER_HOUR,
+        icon="mdi:water",
+    ),
+    SENSOR_TYPE_RAINTOTAL: SensorEntityDescription(
+        key=SENSOR_TYPE_RAINTOTAL,
+        name="Rain total",
+        native_unit_of_measurement=LENGTH_MILLIMETERS,
+        icon="mdi:water",
+    ),
+    SENSOR_TYPE_WINDDIRECTION: SensorEntityDescription(
+        key=SENSOR_TYPE_WINDDIRECTION,
+        name="Wind direction",
+    ),
+    SENSOR_TYPE_WINDAVERAGE: SensorEntityDescription(
+        key=SENSOR_TYPE_WINDAVERAGE,
+        name="Wind average",
+        native_unit_of_measurement=SPEED_METERS_PER_SECOND,
+    ),
+    SENSOR_TYPE_WINDGUST: SensorEntityDescription(
+        key=SENSOR_TYPE_WINDGUST,
+        name="Wind gust",
+        native_unit_of_measurement=SPEED_METERS_PER_SECOND,
+    ),
+    SENSOR_TYPE_UV: SensorEntityDescription(
+        key=SENSOR_TYPE_UV,
+        name="UV",
+        native_unit_of_measurement=UV_INDEX,
+    ),
+    SENSOR_TYPE_WATT: SensorEntityDescription(
+        key=SENSOR_TYPE_WATT,
+        name="Power",
+        native_unit_of_measurement=POWER_WATT,
+    ),
+    SENSOR_TYPE_LUMINANCE: SensorEntityDescription(
+        key=SENSOR_TYPE_LUMINANCE,
+        name="Luminance",
+        native_unit_of_measurement=LIGHT_LUX,
+        device_class=DEVICE_CLASS_ILLUMINANCE,
+    ),
+    SENSOR_TYPE_DEW_POINT: SensorEntityDescription(
+        key=SENSOR_TYPE_DEW_POINT,
+        name="Dew Point",
+        native_unit_of_measurement=TEMP_CELSIUS,
+        device_class=DEVICE_CLASS_TEMPERATURE,
+    ),
+    SENSOR_TYPE_BAROMETRIC_PRESSURE: SensorEntityDescription(
+        key=SENSOR_TYPE_BAROMETRIC_PRESSURE,
+        name="Barometric Pressure",
+        native_unit_of_measurement="kPa",
+    ),
 }
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Old way of setting up TelldusLive.
-
-    Can only be called when a user accidentally mentions the platform in their
-    config. But even in that case it would have been ignored.
-    """
-    pass
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up tellduslive sensors dynamically."""
+
     async def async_discover_sensor(device_id):
         """Discover and add a discovered sensor."""
         client = hass.data[tellduslive.DOMAIN]
@@ -59,12 +112,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     async_dispatcher_connect(
         hass,
-        tellduslive.TELLDUS_DISCOVERY_NEW.format(
-            sensor.DOMAIN, tellduslive.DOMAIN), async_discover_sensor)
+        tellduslive.TELLDUS_DISCOVERY_NEW.format(sensor.DOMAIN, tellduslive.DOMAIN),
+        async_discover_sensor,
+    )
 
 
-class TelldusLiveSensor(TelldusLiveEntity):
+class TelldusLiveSensor(TelldusLiveEntity, SensorEntity):
     """Representation of a Telldus Live sensor."""
+
+    def __init__(self, client, device_id):
+        """Initialize TelldusLiveSensor."""
+        super().__init__(client, device_id)
+        if desc := SENSOR_TYPES.get(self._type):
+            self.entity_description = desc
 
     @property
     def device_id(self):
@@ -99,10 +159,13 @@ class TelldusLiveSensor(TelldusLiveEntity):
     @property
     def name(self):
         """Return the name of the sensor."""
-        return '{} {}'.format(super().name, self.quantity_name or '').strip()
+        quantity_name = (
+            self.entity_description.name if hasattr(self, "entity_description") else ""
+        )
+        return "{} {}".format(super().name, quantity_name or "").strip()
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
         if not self.available:
             return None
@@ -113,30 +176,6 @@ class TelldusLiveSensor(TelldusLiveEntity):
         if self._type == SENSOR_TYPE_LUMINANCE:
             return self._value_as_luminance
         return self._value
-
-    @property
-    def quantity_name(self):
-        """Name of quantity."""
-        return SENSOR_TYPES[self._type][0] \
-            if self._type in SENSOR_TYPES else None
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement."""
-        return SENSOR_TYPES[self._type][1] \
-            if self._type in SENSOR_TYPES else None
-
-    @property
-    def icon(self):
-        """Return the icon."""
-        return SENSOR_TYPES[self._type][2] \
-            if self._type in SENSOR_TYPES else None
-
-    @property
-    def device_class(self):
-        """Return the device class."""
-        return SENSOR_TYPES[self._type][3] \
-            if self._type in SENSOR_TYPES else None
 
     @property
     def unique_id(self) -> str:

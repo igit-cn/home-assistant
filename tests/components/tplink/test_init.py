@@ -1,181 +1,144 @@
 """Tests for the TP-Link component."""
-from unittest.mock import patch
+from __future__ import annotations
 
-import pytest
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
-from homeassistant import config_entries, data_entry_flow
+from homeassistant import setup
 from homeassistant.components import tplink
+from homeassistant.components.tplink.const import DOMAIN
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_registry import EntityRegistry
 from homeassistant.setup import async_setup_component
-from pyHS100 import SmartPlug, SmartBulb
-from tests.common import MockDependency, MockConfigEntry, mock_coro
+from homeassistant.util import dt as dt_util
 
-MOCK_PYHS100 = MockDependency("pyHS100")
+from . import (
+    IP_ADDRESS,
+    MAC_ADDRESS,
+    _mocked_dimmer,
+    _patch_discovery,
+    _patch_single_discovery,
+)
 
-
-async def test_creating_entry_tries_discover(hass):
-    """Test setting up does discovery."""
-    with MOCK_PYHS100, patch(
-        "homeassistant.components.tplink.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as mock_setup, patch(
-        "pyHS100.Discover.discover", return_value={"host": 1234}
-    ):
-        result = await hass.config_entries.flow.async_init(
-            tplink.DOMAIN, context={"source": config_entries.SOURCE_USER}
-        )
-
-        # Confirmation form
-        assert result["type"] == data_entry_flow.RESULT_TYPE_FORM
-
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {}
-        )
-        assert result["type"] == data_entry_flow.RESULT_TYPE_CREATE_ENTRY
-
-        await hass.async_block_till_done()
-
-    assert len(mock_setup.mock_calls) == 1
+from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 async def test_configuring_tplink_causes_discovery(hass):
     """Test that specifying empty config does discovery."""
-    with MOCK_PYHS100, patch("pyHS100.Discover.discover") as discover:
-        discover.return_value = {"host": 1234}
-        await async_setup_component(hass, tplink.DOMAIN, {"tplink": {}})
+    with patch("homeassistant.components.tplink.Discover.discover") as discover:
+        discover.return_value = {MagicMock(): MagicMock()}
+        await async_setup_component(hass, tplink.DOMAIN, {tplink.DOMAIN: {}})
+        await hass.async_block_till_done()
+        call_count = len(discover.mock_calls)
+        assert discover.mock_calls
+
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+        assert len(discover.mock_calls) == call_count * 2
+
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=15))
+        await hass.async_block_till_done()
+        assert len(discover.mock_calls) == call_count * 3
+
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=30))
+        await hass.async_block_till_done()
+        assert len(discover.mock_calls) == call_count * 4
+
+
+async def test_config_entry_reload(hass):
+    """Test that a config entry can be reloaded."""
+    already_migrated_config_entry = MockConfigEntry(
+        domain=DOMAIN, data={}, unique_id=MAC_ADDRESS
+    )
+    already_migrated_config_entry.add_to_hass(hass)
+    with _patch_discovery(), _patch_single_discovery():
+        await async_setup_component(hass, tplink.DOMAIN, {tplink.DOMAIN: {}})
+        await hass.async_block_till_done()
+        assert already_migrated_config_entry.state == ConfigEntryState.LOADED
+        await hass.config_entries.async_unload(already_migrated_config_entry.entry_id)
+        await hass.async_block_till_done()
+        assert already_migrated_config_entry.state == ConfigEntryState.NOT_LOADED
+
+
+async def test_config_entry_retry(hass):
+    """Test that a config entry can be retried."""
+    already_migrated_config_entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: IP_ADDRESS}, unique_id=MAC_ADDRESS
+    )
+    already_migrated_config_entry.add_to_hass(hass)
+    with _patch_discovery(no_device=True), _patch_single_discovery(no_device=True):
+        await async_setup_component(hass, tplink.DOMAIN, {tplink.DOMAIN: {}})
+        await hass.async_block_till_done()
+        assert already_migrated_config_entry.state == ConfigEntryState.SETUP_RETRY
+
+
+async def test_dimmer_switch_unique_id_fix_original_entity_was_deleted(
+    hass: HomeAssistant, entity_reg: EntityRegistry
+):
+    """Test that roll out unique id entity id changed to the original unique id."""
+    config_entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id=MAC_ADDRESS)
+    config_entry.add_to_hass(hass)
+    dimmer = _mocked_dimmer()
+    rollout_unique_id = MAC_ADDRESS.replace(":", "").upper()
+    original_unique_id = tplink.legacy_device_id(dimmer)
+    rollout_dimmer_entity_reg = entity_reg.async_get_or_create(
+        config_entry=config_entry,
+        platform=DOMAIN,
+        domain="light",
+        unique_id=rollout_unique_id,
+        original_name="Rollout dimmer",
+    )
+
+    with _patch_discovery(device=dimmer), _patch_single_discovery(device=dimmer):
+        await setup.async_setup_component(hass, DOMAIN, {})
         await hass.async_block_till_done()
 
-    assert len(discover.mock_calls) == 1
+    migrated_dimmer_entity_reg = entity_reg.async_get_or_create(
+        config_entry=config_entry,
+        platform=DOMAIN,
+        domain="light",
+        unique_id=original_unique_id,
+        original_name="Migrated dimmer",
+    )
+    assert migrated_dimmer_entity_reg.entity_id == rollout_dimmer_entity_reg.entity_id
 
 
-@pytest.mark.parametrize(
-    "name,cls,platform",
-    [
-        ("pyHS100.SmartPlug", SmartPlug, "switch"),
-        ("pyHS100.SmartBulb", SmartBulb, "light"),
-    ],
-)
-@pytest.mark.parametrize("count", [1, 2, 3])
-async def test_configuring_device_types(hass, name, cls, platform, count):
-    """Test that light or switch platform list is filled correctly."""
-    with patch("pyHS100.Discover.discover") as discover, patch(
-        "pyHS100.SmartDevice._query_helper"
-    ):
-        discovery_data = {
-            "123.123.123.{}".format(c): cls("123.123.123.123")
-            for c in range(count)
-        }
-        discover.return_value = discovery_data
-        await async_setup_component(hass, tplink.DOMAIN, {"tplink": {}})
+async def test_dimmer_switch_unique_id_fix_original_entity_still_exists(
+    hass: HomeAssistant, entity_reg: EntityRegistry
+):
+    """Test no migration happens if the original entity id still exists."""
+    config_entry = MockConfigEntry(domain=DOMAIN, data={}, unique_id=MAC_ADDRESS)
+    config_entry.add_to_hass(hass)
+    dimmer = _mocked_dimmer()
+    rollout_unique_id = MAC_ADDRESS.replace(":", "").upper()
+    original_unique_id = tplink.legacy_device_id(dimmer)
+    original_dimmer_entity_reg = entity_reg.async_get_or_create(
+        config_entry=config_entry,
+        platform=DOMAIN,
+        domain="light",
+        unique_id=original_unique_id,
+        original_name="Original dimmer",
+    )
+    rollout_dimmer_entity_reg = entity_reg.async_get_or_create(
+        config_entry=config_entry,
+        platform=DOMAIN,
+        domain="light",
+        unique_id=rollout_unique_id,
+        original_name="Rollout dimmer",
+    )
+
+    with _patch_discovery(device=dimmer), _patch_single_discovery(device=dimmer):
+        await setup.async_setup_component(hass, DOMAIN, {})
         await hass.async_block_till_done()
 
-    assert len(discover.mock_calls) == 1
-    assert len(hass.data[tplink.DOMAIN][platform]) == count
-
-
-async def test_is_dimmable(hass):
-    """Test that is_dimmable switches are correctly added as lights."""
-    with patch("pyHS100.Discover.discover") as discover, patch(
-        "homeassistant.components.tplink.light.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as setup, patch("pyHS100.SmartDevice._query_helper"), patch(
-        "pyHS100.SmartPlug.is_dimmable", True
-    ):
-        dimmable_switch = SmartPlug("123.123.123.123")
-        discover.return_value = {"host": dimmable_switch}
-
-        await async_setup_component(hass, tplink.DOMAIN, {"tplink": {}})
-        await hass.async_block_till_done()
-
-    assert len(discover.mock_calls) == 1
-    assert len(setup.mock_calls) == 1
-    assert len(hass.data[tplink.DOMAIN]["light"]) == 1
-    assert len(hass.data[tplink.DOMAIN]["switch"]) == 0
-
-
-async def test_configuring_discovery_disabled(hass):
-    """Test that discover does not get called when disabled."""
-    with MOCK_PYHS100, patch(
-        "homeassistant.components.tplink.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as mock_setup, patch(
-        "pyHS100.Discover.discover", return_value=[]
-    ) as discover:
-        await async_setup_component(
-            hass,
-            tplink.DOMAIN,
-            {tplink.DOMAIN: {tplink.CONF_DISCOVERY: False}},
-        )
-        await hass.async_block_till_done()
-
-    assert len(discover.mock_calls) == 0
-    assert len(mock_setup.mock_calls) == 1
-
-
-async def test_platforms_are_initialized(hass):
-    """Test that platforms are initialized per configuration array."""
-    config = {
-        "tplink": {
-            "discovery": False,
-            "light": [{"host": "123.123.123.123"}],
-            "switch": [{"host": "321.321.321.321"}],
-        }
-    }
-
-    with patch("pyHS100.Discover.discover") as discover, patch(
-        "pyHS100.SmartDevice._query_helper"
-    ), patch(
-        "homeassistant.components.tplink.light.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as light_setup, patch(
-        "homeassistant.components.tplink.switch.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as switch_setup, patch(
-        "pyHS100.SmartPlug.is_dimmable", False
-    ):
-        # patching is_dimmable is necessray to avoid misdetection as light.
-        await async_setup_component(hass, tplink.DOMAIN, config)
-        await hass.async_block_till_done()
-
-    assert len(discover.mock_calls) == 0
-    assert len(light_setup.mock_calls) == 1
-    assert len(switch_setup.mock_calls) == 1
-
-
-async def test_no_config_creates_no_entry(hass):
-    """Test for when there is no tplink in config."""
-    with MOCK_PYHS100, patch(
-        "homeassistant.components.tplink.async_setup_entry",
-        return_value=mock_coro(True),
-    ) as mock_setup:
-        await async_setup_component(hass, tplink.DOMAIN, {})
-        await hass.async_block_till_done()
-
-    assert len(mock_setup.mock_calls) == 0
-
-
-@pytest.mark.parametrize("platform", ["switch", "light"])
-async def test_unload(hass, platform):
-    """Test that the async_unload_entry works."""
-    # As we have currently no configuration, we just to pass the domain here.
-    entry = MockConfigEntry(domain=tplink.DOMAIN)
-    entry.add_to_hass(hass)
-
-    with patch("pyHS100.SmartDevice._query_helper"), patch(
-        "homeassistant.components.tplink.{}"
-        ".async_setup_entry".format(platform),
-        return_value=mock_coro(True),
-    ) as light_setup:
-        config = {
-            "tplink": {
-                platform: [{"host": "123.123.123.123"}],
-                "discovery": False,
-            }
-        }
-        assert await async_setup_component(hass, tplink.DOMAIN, config)
-        await hass.async_block_till_done()
-
-        assert len(light_setup.mock_calls) == 1
-        assert tplink.DOMAIN in hass.data
-
-    assert await tplink.async_unload_entry(hass, entry)
-    assert not hass.data[tplink.DOMAIN]
+    migrated_dimmer_entity_reg = entity_reg.async_get_or_create(
+        config_entry=config_entry,
+        platform=DOMAIN,
+        domain="light",
+        unique_id=original_unique_id,
+        original_name="Migrated dimmer",
+    )
+    assert migrated_dimmer_entity_reg.entity_id == original_dimmer_entity_reg.entity_id
+    assert migrated_dimmer_entity_reg.entity_id != rollout_dimmer_entity_reg.entity_id

@@ -1,28 +1,27 @@
 """Support for Etherscan sensors."""
 from datetime import timedelta
 
+from pyetherscan import get_balance
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (
-    ATTR_ATTRIBUTION, CONF_ADDRESS, CONF_NAME, CONF_TOKEN)
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import ATTR_ATTRIBUTION, CONF_ADDRESS, CONF_NAME, CONF_TOKEN
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
-
-REQUIREMENTS = ['python-etherscan-api==0.0.3']
 
 ATTRIBUTION = "Data provided by etherscan.io"
 
-CONF_TOKEN_ADDRESS = 'token_address'
+CONF_TOKEN_ADDRESS = "token_address"
 
 SCAN_INTERVAL = timedelta(minutes=5)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_ADDRESS): cv.string,
-    vol.Optional(CONF_NAME): cv.string,
-    vol.Optional(CONF_TOKEN): cv.string,
-    vol.Optional(CONF_TOKEN_ADDRESS): cv.string,
-})
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_ADDRESS): cv.string,
+        vol.Optional(CONF_NAME): cv.string,
+        vol.Optional(CONF_TOKEN): cv.string,
+        vol.Optional(CONF_TOKEN_ADDRESS): cv.string,
+    }
+)
 
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -35,14 +34,14 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     if token:
         token = token.upper()
         if not name:
-            name = "%s Balance" % token
+            name = f"{token} Balance"
     if not name:
         name = "ETH Balance"
 
     add_entities([EtherscanSensor(name, address, token, token_address)], True)
 
 
-class EtherscanSensor(Entity):
+class EtherscanSensor(SensorEntity):
     """Representation of an Etherscan.io sensor."""
 
     def __init__(self, name, address, token, token_address):
@@ -60,23 +59,23 @@ class EtherscanSensor(Entity):
         return self._name
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
         return self._state
 
     @property
-    def unit_of_measurement(self):
+    def native_unit_of_measurement(self):
         """Return the unit of measurement this sensor expresses itself in."""
         return self._unit_of_measurement
 
     @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the state attributes of the sensor."""
         return {ATTR_ATTRIBUTION: ATTRIBUTION}
 
     def update(self):
         """Get the latest state of the sensor."""
-        from pyetherscan import get_balance
+
         if self._token_address:
             self._state = get_balance(self._address, self._token_address)
         elif self._token:

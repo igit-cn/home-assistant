@@ -1,167 +1,227 @@
-"""
-Support for SolarEdge Monitoring API.
+"""Support for SolarEdge Monitoring API."""
+from __future__ import annotations
 
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.solaredge/
-"""
+from typing import Any
 
-from datetime import timedelta
-import logging
+from solaredge import Solaredge
 
-import voluptuous as vol
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import DEVICE_CLASS_BATTERY, DEVICE_CLASS_POWER
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-from homeassistant.const import (
-    CONF_API_KEY, CONF_MONITORED_CONDITIONS, CONF_NAME, POWER_WATT,
-    ENERGY_WATT_HOUR)
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.entity import Entity
-from homeassistant.util import Throttle
-
-REQUIREMENTS = ['solaredge==0.0.2']
-
-# Config for solaredge monitoring api requests.
-CONF_SITE_ID = "site_id"
-
-UPDATE_DELAY = timedelta(minutes=10)
-SCAN_INTERVAL = timedelta(minutes=10)
-
-# Supported sensor types:
-# Key: ['json_key', 'name', unit, icon]
-SENSOR_TYPES = {
-    'lifetime_energy': ['lifeTimeData', "Lifetime energy",
-                        ENERGY_WATT_HOUR, 'mdi:solar-power'],
-    'energy_this_year': ['lastYearData', "Energy this year",
-                         ENERGY_WATT_HOUR, 'mdi:solar-power'],
-    'energy_this_month': ['lastMonthData', "Energy this month",
-                          ENERGY_WATT_HOUR, 'mdi:solar-power'],
-    'energy_today': ['lastDayData', "Energy today",
-                     ENERGY_WATT_HOUR, 'mdi:solar-power'],
-    'current_power': ['currentPower', "Current Power",
-                      POWER_WATT, 'mdi:solar-power']
-}
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_API_KEY): cv.string,
-    vol.Required(CONF_SITE_ID): cv.string,
-    vol.Optional(CONF_NAME, default='SolarEdge'): cv.string,
-    vol.Optional(CONF_MONITORED_CONDITIONS, default=['current_power']):
-    vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)])
-})
-
-_LOGGER = logging.getLogger(__name__)
+from .const import CONF_SITE_ID, DATA_API_CLIENT, DOMAIN, SENSOR_TYPES
+from .coordinator import (
+    SolarEdgeDataService,
+    SolarEdgeDetailsDataService,
+    SolarEdgeEnergyDetailsService,
+    SolarEdgeInventoryDataService,
+    SolarEdgeOverviewDataService,
+    SolarEdgePowerFlowDataService,
+)
+from .models import SolarEdgeSensorEntityDescription
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Create the SolarEdge Monitoring API sensor."""
-    import solaredge
-    from requests.exceptions import HTTPError, ConnectTimeout
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Add an solarEdge entry."""
+    # Add the needed sensors to hass
+    api: Solaredge = hass.data[DOMAIN][entry.entry_id][DATA_API_CLIENT]
 
-    api_key = config[CONF_API_KEY]
-    site_id = config[CONF_SITE_ID]
-    platform_name = config[CONF_NAME]
+    sensor_factory = SolarEdgeSensorFactory(
+        hass, entry.title, entry.data[CONF_SITE_ID], api
+    )
+    for service in sensor_factory.all_services:
+        service.async_setup()
+        await service.coordinator.async_refresh()
 
-    # Create new SolarEdge object to retrieve data
-    api = solaredge.Solaredge(api_key)
-
-    # Check if api can be reached and site is active
-    try:
-        response = api.get_details(site_id)
-
-        if response['details']['status'].lower() != 'active':
-            _LOGGER.error("SolarEdge site is not active")
-            return
-        _LOGGER.debug("Credentials correct and site is active")
-    except KeyError:
-        _LOGGER.error("Missing details data in solaredge response")
-        return
-    except (ConnectTimeout, HTTPError):
-        _LOGGER.error("Could not retrieve details from SolarEdge API")
-        return
-
-    # Create solaredge data service which will retrieve and update the data.
-    data = SolarEdgeData(hass, api, site_id)
-
-    # Create a new sensor for each sensor type.
     entities = []
-    for sensor_key in config[CONF_MONITORED_CONDITIONS]:
-        sensor = SolarEdgeSensor(platform_name, sensor_key, data)
-        entities.append(sensor)
+    for sensor_type in SENSOR_TYPES:
+        sensor = sensor_factory.create_sensor(sensor_type)
+        if sensor is not None:
+            entities.append(sensor)
+    async_add_entities(entities)
 
-    add_entities(entities, True)
 
+class SolarEdgeSensorFactory:
+    """Factory which creates sensors based on the sensor_key."""
 
-class SolarEdgeSensor(Entity):
-    """Representation of an SolarEdge Monitoring API sensor."""
-
-    def __init__(self, platform_name, sensor_key, data):
-        """Initialize the sensor."""
+    def __init__(
+        self, hass: HomeAssistant, platform_name: str, site_id: str, api: Solaredge
+    ) -> None:
+        """Initialize the factory."""
         self.platform_name = platform_name
-        self.sensor_key = sensor_key
-        self.data = data
-        self._state = None
 
-        self._json_key = SENSOR_TYPES[self.sensor_key][0]
-        self._unit_of_measurement = SENSOR_TYPES[self.sensor_key][2]
+        details = SolarEdgeDetailsDataService(hass, api, site_id)
+        overview = SolarEdgeOverviewDataService(hass, api, site_id)
+        inventory = SolarEdgeInventoryDataService(hass, api, site_id)
+        flow = SolarEdgePowerFlowDataService(hass, api, site_id)
+        energy = SolarEdgeEnergyDetailsService(hass, api, site_id)
+
+        self.all_services = (details, overview, inventory, flow, energy)
+
+        self.services: dict[
+            str,
+            tuple[
+                type[SolarEdgeSensorEntity | SolarEdgeOverviewSensor],
+                SolarEdgeDataService,
+            ],
+        ] = {"site_details": (SolarEdgeDetailsSensor, details)}
+
+        for key in (
+            "lifetime_energy",
+            "energy_this_year",
+            "energy_this_month",
+            "energy_today",
+            "current_power",
+        ):
+            self.services[key] = (SolarEdgeOverviewSensor, overview)
+
+        for key in ("meters", "sensors", "gateways", "batteries", "inverters"):
+            self.services[key] = (SolarEdgeInventorySensor, inventory)
+
+        for key in ("power_consumption", "solar_power", "grid_power", "storage_power"):
+            self.services[key] = (SolarEdgePowerFlowSensor, flow)
+
+        for key in ("storage_level",):
+            self.services[key] = (SolarEdgeStorageLevelSensor, flow)
+
+        for key in (
+            "purchased_power",
+            "production_power",
+            "feedin_power",
+            "consumption_power",
+            "selfconsumption_power",
+        ):
+            self.services[key] = (SolarEdgeEnergyDetailsSensor, energy)
+
+    def create_sensor(
+        self, sensor_type: SolarEdgeSensorEntityDescription
+    ) -> SolarEdgeSensorEntityDescription:
+        """Create and return a sensor based on the sensor_key."""
+        sensor_class, service = self.services[sensor_type.key]
+
+        return sensor_class(self.platform_name, sensor_type, service)
+
+
+class SolarEdgeSensorEntity(CoordinatorEntity, SensorEntity):
+    """Abstract class for a solaredge sensor."""
+
+    entity_description: SolarEdgeSensorEntityDescription
+
+    def __init__(
+        self,
+        platform_name: str,
+        description: SolarEdgeSensorEntityDescription,
+        data_service: SolarEdgeDataService,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(data_service.coordinator)
+        self.platform_name = platform_name
+        self.entity_description = description
+        self.data_service = data_service
+
+        self._attr_name = f"{platform_name} ({description.name})"
+
+
+class SolarEdgeOverviewSensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API overview sensor."""
 
     @property
-    def name(self):
-        """Return the name."""
-        return "{} ({})".format(self.platform_name,
-                                SENSOR_TYPES[self.sensor_key][1])
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement."""
-        return self._unit_of_measurement
-
-    @property
-    def icon(self):
-        """Return the sensor icon."""
-        return SENSOR_TYPES[self.sensor_key][3]
-
-    @property
-    def state(self):
+    def native_value(self) -> str | None:
         """Return the state of the sensor."""
-        return self._state
-
-    def update(self):
-        """Get the latest data from the sensor and update the state."""
-        self.data.update()
-        self._state = self.data.data[self._json_key]
+        return self.data_service.data.get(self.entity_description.json_key)
 
 
-class SolarEdgeData:
-    """Get and update the latest data."""
+class SolarEdgeDetailsSensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API details sensor."""
 
-    def __init__(self, hass, api, site_id):
-        """Initialize the data object."""
-        self.hass = hass
-        self.api = api
-        self.data = {}
-        self.site_id = site_id
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return self.data_service.attributes
 
-    @Throttle(UPDATE_DELAY)
-    def update(self):
-        """Update the data from the SolarEdge Monitoring API."""
-        from requests.exceptions import HTTPError, ConnectTimeout
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the sensor."""
+        return self.data_service.data
 
-        try:
-            data = self.api.get_overview(self.site_id)
-            overview = data['overview']
-        except KeyError:
-            _LOGGER.error("Missing overview data, skipping update")
-            return
-        except (ConnectTimeout, HTTPError):
-            _LOGGER.error("Could not retrieve data, skipping update")
-            return
 
-        self.data = {}
+class SolarEdgeInventorySensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API inventory sensor."""
 
-        for key, value in overview.items():
-            if 'energy' in value:
-                self.data[key] = value['energy']
-            elif 'power' in value:
-                self.data[key] = value['power']
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return self.data_service.attributes.get(self.entity_description.json_key)
 
-        _LOGGER.debug("Updated SolarEdge overview data: %s", self.data)
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the sensor."""
+        return self.data_service.data.get(self.entity_description.json_key)
+
+
+class SolarEdgeEnergyDetailsSensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API power flow sensor."""
+
+    def __init__(self, platform_name, sensor_type, data_service):
+        """Initialize the power flow sensor."""
+        super().__init__(platform_name, sensor_type, data_service)
+
+        self._attr_native_unit_of_measurement = data_service.unit
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return self.data_service.attributes.get(self.entity_description.json_key)
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the sensor."""
+        return self.data_service.data.get(self.entity_description.json_key)
+
+
+class SolarEdgePowerFlowSensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API power flow sensor."""
+
+    _attr_device_class = DEVICE_CLASS_POWER
+
+    def __init__(
+        self,
+        platform_name: str,
+        description: SolarEdgeSensorEntityDescription,
+        data_service: SolarEdgeDataService,
+    ) -> None:
+        """Initialize the power flow sensor."""
+        super().__init__(platform_name, description, data_service)
+
+        self._attr_native_unit_of_measurement = data_service.unit
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return self.data_service.attributes.get(self.entity_description.json_key)
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the sensor."""
+        return self.data_service.data.get(self.entity_description.json_key)
+
+
+class SolarEdgeStorageLevelSensor(SolarEdgeSensorEntity):
+    """Representation of an SolarEdge Monitoring API storage level sensor."""
+
+    _attr_device_class = DEVICE_CLASS_BATTERY
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the state of the sensor."""
+        attr = self.data_service.attributes.get(self.entity_description.json_key)
+        if attr and "soc" in attr:
+            return attr["soc"]
+        return None

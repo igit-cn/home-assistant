@@ -1,27 +1,24 @@
 """Support for VOC."""
-import logging
+from homeassistant.components.binary_sensor import DEVICE_CLASSES, BinarySensorEntity
 
-from homeassistant.components.volvooncall import VolvoEntity, DATA_KEY
-from homeassistant.components.binary_sensor import (
-    BinarySensorDevice, DEVICE_CLASSES)
-
-_LOGGER = logging.getLogger(__name__)
+from . import DATA_KEY, VolvoEntity
 
 
-async def async_setup_platform(
-        hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the Volvo sensors."""
     if discovery_info is None:
         return
     async_add_entities([VolvoSensor(hass.data[DATA_KEY], *discovery_info)])
 
 
-class VolvoSensor(VolvoEntity, BinarySensorDevice):
+class VolvoSensor(VolvoEntity, BinarySensorEntity):
     """Representation of a Volvo sensor."""
 
     @property
     def is_on(self):
-        """Return True if the binary sensor is on."""
+        """Return True if the binary sensor is on, but invert for the 'Door lock'."""
+        if self.instrument.attr == "is_locked":
+            return not self.instrument.is_on
         return self.instrument.is_on
 
     @property
